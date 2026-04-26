@@ -59,11 +59,14 @@ CREATE TABLE barber_schedule_exceptions (
 CREATE TABLE services (
   id SERIAL PRIMARY KEY,
   shop_id INTEGER REFERENCES shops(id) ON DELETE CASCADE,
-  name VARCHAR(100) NOT NULL,       -- e.g. "Haircut", "Beard Trim"
-  duration_minutes INTEGER NOT NULL, -- how long the service takes
+  name VARCHAR(100) NOT NULL,
+  duration_minutes INTEGER NOT NULL,
   price NUMERIC(10, 2) NOT NULL,
+  child_duration_minutes INTEGER,        -- null = no child tier for this service
+  child_price NUMERIC(10, 2),            -- null = no child tier for this service
   is_active BOOLEAN DEFAULT true
 );
+
 
 -- CUSTOMERS
 CREATE TABLE customers (
