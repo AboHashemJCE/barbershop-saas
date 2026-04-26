@@ -131,43 +131,7 @@ export const getAvailableSlots = async (req, res) => {
     // Step 1 inside SQL: resolve working hours (exception overrides weekly schedule)
     // Step 2 inside SQL: generate_series creates every possible slot
     // Step 3 inside SQL: NOT EXISTS filters out slots that conflict with existing bookings
-    const slotsResult = await pool.query(
-      `WITH working_hours AS (
-         SELECT
-           CASE WHEN e.id IS NOT NULL THEN e.is_day_off
-                ELSE ws.is_day_off
-           END AS is_day_off,
-           CASE WHEN e.id IS NOT NULL THEN e.start_time
-                ELSE ws.start_time
-           END AS start_time,
-           CASE WHEN e.id IS NOT NULL THEN e.end_time
-                ELSE ws.end_time
-           END AS end_time
-         FROM barber_schedules ws
-         LEFT JOIN barber_schedule_exceptions e
-           ON e.barber_id = ws.barber_id
-           AND e.exception_date = $2
-         WHERE ws.barber_id = $1
-           AND ws.day_of_week = EXTRACT(DOW FROM $2::date)
-       )
-       SELECT slot::time AS slot_time
-       FROM working_hours wh,
-       generate_series(
-         ($2::date + wh.start_time)::timestamp,
-         ($2::date + wh.end_time)::timestamp - ($3 || ' minutes')::interval,
-         ($3 || ' minutes')::interval
-       ) AS slot
-       WHERE wh.is_day_off = false
-         AND NOT EXISTS (
-           SELECT 1 FROM appointments
-           WHERE barber_id = $1
-             AND appointment_date = $2
-             AND status IN ('pending', 'confirmed')
-             AND start_time < (slot::time + ($3 || ' minutes')::interval)
-             AND end_time > slot::time
-         )`,
-      [barber_id, date, durationMinutes]
-    );
+
 
     // If no rows returned and it's because barber is off (not just fully booked)
     const isWorkingResult = await pool.query(
