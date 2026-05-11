@@ -6,7 +6,7 @@ import shopRoutes from './routes/shops.js';
 import barberRoutes from './routes/barbers.js';
 import serviceRoutes from './routes/services.js';
 import scheduleRoutes from './routes/schedules.js';
-
+import appointmentRoutes from './routes/appointments.js';
 
 dotenv.config();
 
@@ -44,7 +44,7 @@ app.use('/api/shops', shopRoutes);
 app.use('/api/barbers', barberRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/schedules', scheduleRoutes);
-
+app.use('/api/appointments', appointmentRoutes);
 
 //Start Server
 app.listen(PORT, () => {
