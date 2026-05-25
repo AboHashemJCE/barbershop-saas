@@ -117,13 +117,3 @@ CREATE TABLE super_admins (
   password TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT NOW()
 );
-
--- OTP CODES
-CREATE TABLE otp_codes (
-  id SERIAL PRIMARY KEY,
-  phone VARCHAR(20) NOT NULL,
-  code VARCHAR(6) NOT NULL,
-  expires_at TIMESTAMP NOT NULL,
-  used BOOLEAN DEFAULT false,
-  created_at TIMESTAMP DEFAULT NOW()
-);
