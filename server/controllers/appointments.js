@@ -308,7 +308,9 @@ export const getAvailability = async (req, res) => {
 // Each guest has their own barber_id and start_time
 // ----------------------------
 export const createAppointment = async (req, res) => {
-  const { shop_id, customer_id, appointment_date, notes, persons } = req.body;
+ 
+  const { shop_id, appointment_date, notes, persons } = req.body;
+  const customer_id = req.user.id;
 
   // --- Basic validation ---
   if (!shop_id || !customer_id || !appointment_date || !persons) {
@@ -878,41 +880,50 @@ export const getShopAppointments = async (req, res) => {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    let query = `
-      SELECT
-        a.*,
-        b.name AS barber_name,
-        s.name AS service_name,
-        c.name AS customer_name,
-        c.phone AS customer_phone
-      FROM appointments a
-      JOIN barbers b ON a.barber_id = b.id
-      JOIN services s ON a.service_id = s.id
-      JOIN customers c ON a.customer_id = c.id
-      WHERE a.shop_id = $1
-    `;
-
+    // Build query dynamically based on optional filters
+    let conditions = 'WHERE a.shop_id = $1';
     const params = [shopId];
 
     if (status) {
       params.push(status);
-      query += ` AND a.status = $${params.length}`;
+      conditions += ` AND a.status = $${params.length}`;
     }
 
     if (date) {
       params.push(date);
-      query += ` AND a.appointment_date = $${params.length}`;
+      conditions += ` AND a.appointment_date = $${params.length}`;
     }
 
-    query += ' ORDER BY a.appointment_date ASC, a.start_time ASC';
+    const result = await pool.query(
+      `SELECT
+         a.*,
+         b.name AS barber_name,
+         c.name AS customer_name,
+         c.phone AS customer_phone,
+         json_agg(
+           json_build_object(
+             'service_id', aps.service_id,
+             'service_name', aps.service_name,
+             'customer_type', aps.customer_type,
+             'price', aps.price,
+             'duration_minutes', aps.duration_minutes
+           )
+         ) AS services
+       FROM appointments a
+       JOIN barbers b ON a.barber_id = b.id
+       JOIN customers c ON a.customer_id = c.id
+       JOIN appointment_services aps ON aps.appointment_id = a.id
+       ${conditions}
+       GROUP BY a.id, b.name, c.name, c.phone
+       ORDER BY a.appointment_date ASC, a.start_time ASC`,
+      params
+    );
 
-    const result = await pool.query(query, params);
     res.json({ appointments: result.rows });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
-
 // ----------------------------
 // GET /api/appointments/barber/:barberId
 // Get appointments for a specific barber (barber panel view)
@@ -935,39 +946,47 @@ export const getBarberAppointments = async (req, res) => {
       return res.status(404).json({ message: 'Barber not found in this shop' });
     }
 
-    let query = `
-      SELECT
-        a.*,
-        s.name AS service_name,
-        c.name AS customer_name,
-        c.phone AS customer_phone
-      FROM appointments a
-      JOIN services s ON a.service_id = s.id
-      JOIN customers c ON a.customer_id = c.id
-      WHERE a.barber_id = $1
-    `;
-
+    let conditions = 'WHERE a.barber_id = $1';
     const params = [barberId];
 
     if (status) {
       params.push(status);
-      query += ` AND a.status = $${params.length}`;
+      conditions += ` AND a.status = $${params.length}`;
     }
 
     if (date) {
       params.push(date);
-      query += ` AND a.appointment_date = $${params.length}`;
+      conditions += ` AND a.appointment_date = $${params.length}`;
     }
 
-    query += ' ORDER BY a.appointment_date ASC, a.start_time ASC';
+    const result = await pool.query(
+      `SELECT
+         a.*,
+         c.name AS customer_name,
+         c.phone AS customer_phone,
+         json_agg(
+           json_build_object(
+             'service_id', aps.service_id,
+             'service_name', aps.service_name,
+             'customer_type', aps.customer_type,
+             'price', aps.price,
+             'duration_minutes', aps.duration_minutes
+           )
+         ) AS services
+       FROM appointments a
+       JOIN customers c ON a.customer_id = c.id
+       JOIN appointment_services aps ON aps.appointment_id = a.id
+       ${conditions}
+       GROUP BY a.id, c.name, c.phone
+       ORDER BY a.appointment_date ASC, a.start_time ASC`,
+      params
+    );
 
-    const result = await pool.query(query, params);
     res.json({ appointments: result.rows });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
-
 // ----------------------------
 // PUT /api/appointments/:id/status
 // Barber confirms, marks complete or no_show
