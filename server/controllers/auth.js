@@ -70,10 +70,10 @@ export const requestOtp = async (req, res) => {
     // Send OTP via Twilio Verify WhatsApp channel
     // Twilio handles OTP generation, delivery, expiry and rate limiting
     await twilioClient.verify.v2
-      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
+      .services(process.env.TWILIO_SERVICE_SID)
       .verifications.create({
-        to: `whatsapp:${phone}`,
-        channel: 'whatsapp'
+        to: phone,
+        channel: 'sms'
       });
 
     res.json({ message: 'OTP sent via WhatsApp ✅' });
@@ -109,9 +109,9 @@ export const verifyOtp = async (req, res) => {
     // Verify OTP with Twilio
     // Twilio checks: correct code, not expired, not already used, not too many attempts
     const verificationCheck = await twilioClient.verify.v2
-      .services(process.env.TWILIO_VERIFY_SERVICE_SID)
+      .services(process.env.TWILIO_SERVICE_SID)
       .verificationChecks.create({
-        to: `whatsapp:${phone}`,
+        to: phone,
         code
       });
 
