@@ -308,72 +308,34 @@ export const getAvailability = async (req, res) => {
 // Each guest has their own barber_id and start_time
 // ----------------------------
 export const createAppointment = async (req, res) => {
-  const {
-    shop_id,
-    barber_id,
-    service_id,
-    customer_id,
-    appointment_date,
-    start_time,
-    customer_type = 'adult',
-    notes,
-    guests // [{ type: 'adult'|'child', barber_id: number, start_time: 'HH:MM' }]
-  } = req.body;
+  const { shop_id, customer_id, appointment_date, notes, persons } = req.body;
 
   // --- Basic validation ---
-  if (!hasValue(shop_id) || !hasValue(barber_id) || !hasValue(service_id) || !hasValue(customer_id) || !hasValue(appointment_date) || !hasValue(start_time)) {
-    return res.status(400).json({ message: 'shop_id, barber_id, service_id, customer_id, appointment_date and start_time are required' });
+  if (!shop_id || !customer_id || !appointment_date || !persons) {
+    return res.status(400).json({ message: 'shop_id, customer_id, appointment_date and persons are required' });
   }
 
-  if (!['adult', 'child'].includes(customer_type)) {
-    return res.status(400).json({ message: 'customer_type must be adult or child' });
+  if (!Array.isArray(persons) || persons.length === 0) {
+    return res.status(400).json({ message: 'persons must be a non-empty array' });
   }
 
-  // --- Validate guests array ---
-  if (guests !== undefined) {
-    if (!Array.isArray(guests)) {
-      return res.status(400).json({ message: 'guests must be an array' });
+  for (const [index, person] of persons.entries()) {
+    if (!person.barber_id || !person.start_time || !person.customer_type || !person.services) {
+      return res.status(400).json({
+        message: `Person ${index + 1}: barber_id, start_time, customer_type and services are required`
+      });
     }
 
-    for (const [index, guest] of guests.entries()) {
-      if (!['adult', 'child'].includes(guest.type)) {
-        return res.status(400).json({ message: `Guest ${index + 1}: type must be adult or child` });
-      }
-      if (!guest.barber_id) {
-        return res.status(400).json({ message: `Guest ${index + 1}: barber_id is required` });
-      }
-      if (!guest.start_time) {
-        return res.status(400).json({ message: `Guest ${index + 1}: start_time is required` });
-      }
+    if (!['adult', 'child'].includes(person.customer_type)) {
+      return res.status(400).json({
+        message: `Person ${index + 1}: customer_type must be adult or child`
+      });
     }
-  }
 
-  // Build the full list of all appointments we want to make
-  // [{ barber_id, start_time, customer_type }]
-  const allBookings = [
-    { barber_id: Number(barber_id), start_time, customer_type },
-    ...(guests || []).map(g => ({
-      barber_id: Number(g.barber_id),
-      start_time: g.start_time,
-      customer_type: g.type
-    }))
-  ];
-
-  // Check for overlapping times within the same barber across the group
-  // Two people can use the same barber as long as their times don't overlap
-  for (let i = 0; i < allBookings.length; i++) {
-    for (let j = i + 1; j < allBookings.length; j++) {
-      const a = allBookings[i];
-      const b = allBookings[j];
-      if (a.barber_id !== b.barber_id) continue;
-
-      // We don't know durations yet — we'll do this check properly inside the transaction
-      // after we fetch the service. Flag duplicate barber for now if same start time.
-      if (a.start_time === b.start_time) {
-        return res.status(400).json({
-          message: 'Two people in the group cannot have the same barber at the same time'
-        });
-      }
+    if (!Array.isArray(person.services) || person.services.length === 0) {
+      return res.status(400).json({
+        message: `Person ${index + 1}: services must be a non-empty array of service ids`
+      });
     }
   }
 
@@ -392,28 +354,6 @@ export const createAppointment = async (req, res) => {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    // --- Get service ---
-    const serviceResult = await client.query(
-      'SELECT * FROM services WHERE id = $1 AND shop_id = $2 AND is_active = true',
-      [service_id, shop_id]
-    );
-    if (serviceResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Service not found in this shop' });
-    }
-
-    const service = serviceResult.rows[0];
-
-    if (customer_type === 'child' && !service.child_duration_minutes) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'This service does not have a child tier' });
-    }
-
-    if (guests && guests.some(g => g.type === 'child') && !service.child_duration_minutes) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'This service does not have a child tier' });
-    }
-
     // --- Validate customer ---
     const customerCheck = await client.query(
       'SELECT id FROM customers WHERE id = $1',
@@ -424,135 +364,311 @@ export const createAppointment = async (req, res) => {
       return res.status(404).json({ message: 'Customer not found' });
     }
 
-    // --- Get duration and price for a given customer type ---
-    const getServiceDetails = (type) => {
-      if (type === 'child') {
-        return { duration: service.child_duration_minutes, price: service.child_price };
-      }
-      return { duration: service.duration_minutes, price: service.price };
-    };
-
-    // --- Validate all barbers and check conflicts in one loop ---
-    // Get all unique barber IDs across the group
-    const uniqueBarberIds = [...new Set(allBookings.map(b => b.barber_id))];
-
-    // Fetch all relevant barbers in one query
-    const barbersResult = await client.query(
-      `SELECT id FROM barbers
-       WHERE id = ANY($1::int[])
-         AND shop_id = $2
-         AND is_active = true`,
-      [uniqueBarberIds, shop_id]
+    // --- Validate appointment_date is not in the past ---
+    // Use PostgreSQL to stay consistent with timezone set in pool.js
+    const dateCheck = await client.query(
+      `SELECT
+         $1::date >= CURRENT_DATE AS is_valid,
+         $1::date = CURRENT_DATE AS is_today`,
+      [appointment_date]
     );
 
-    if (barbersResult.rows.length !== uniqueBarberIds.length) {
+    if (!dateCheck.rows[0].is_valid) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'One or more barbers not found in this shop' });
+      return res.status(400).json({ message: 'appointment_date cannot be in the past' });
     }
 
-    // Build a complete picture of what each booking looks like with end times
-    const resolvedBookings = allBookings.map(booking => {
-      const details = getServiceDetails(booking.customer_type);
-      const endTime = toTimeString(toMinutes(booking.start_time) + details.duration);
-      return {
-        ...booking,
-        end_time: endTime,
-        duration: details.duration,
-        price: details.price
-      };
-    });
-
-    // Now check properly for overlapping times within the same barber
-    for (let i = 0; i < resolvedBookings.length; i++) {
-      for (let j = i + 1; j < resolvedBookings.length; j++) {
-        const a = resolvedBookings[i];
-        const b = resolvedBookings[j];
-        if (a.barber_id !== b.barber_id) continue;
-
-        const aStart = toMinutes(a.start_time);
-        const aEnd = toMinutes(a.end_time);
-        const bStart = toMinutes(b.start_time);
-        const bEnd = toMinutes(b.end_time);
-
-        if (aStart < bEnd && aEnd > bStart) {
+    // --- If booking is for today validate each person's start_time is not in the past ---
+    if (dateCheck.rows[0].is_today) {
+      for (const [index, person] of persons.entries()) {
+        const timeCheck = await client.query(
+          `SELECT (CURRENT_DATE + $1::time)::timestamp > NOW() AS is_valid`,
+          [person.start_time]
+        );
+        if (!timeCheck.rows[0].is_valid) {
           await client.query('ROLLBACK');
           return res.status(400).json({
-            message: `Two people in the group have overlapping times with barber ${a.barber_id}`
+            message: `Person ${index + 1}: start_time ${person.start_time} is in the past`
           });
         }
       }
     }
 
-    // Fetch all existing appointments for all involved barbers on this date in one query
+    // --- Get all unique service ids and barber ids across all persons ---
+    const allServiceIds = [...new Set(persons.flatMap(p => p.services))];
+    const allBarberIds = [...new Set(persons.map(p => Number(p.barber_id)))];
+
+    // --- Fetch all services in one query ---
+    const servicesResult = await client.query(
+      `SELECT id, name, duration_minutes, price, child_duration_minutes, child_price
+       FROM services
+       WHERE id = ANY($1::int[])
+         AND shop_id = $2
+         AND is_active = true`,
+      [allServiceIds, shop_id]
+    );
+
+    const servicesMap = {};
+    for (const service of servicesResult.rows) {
+      servicesMap[service.id] = service;
+    }
+
+    // Check all requested services were found
+    for (const [index, person] of persons.entries()) {
+      for (const serviceId of person.services) {
+        if (!servicesMap[serviceId]) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({
+            message: `Person ${index + 1}: service ${serviceId} not found in this shop`
+          });
+        }
+      }
+    }
+
+    // --- Fetch all barbers in one query ---
+    const barbersResult = await client.query(
+      `SELECT id FROM barbers
+       WHERE id = ANY($1::int[])
+         AND shop_id = $2
+         AND is_active = true`,
+      [allBarberIds, shop_id]
+    );
+
+    if (barbersResult.rows.length !== allBarberIds.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'One or more barbers not found in this shop' });
+    }
+
+    // --- Fetch working hours for all barbers on this date in one query ---
+    // Use PostgreSQL to extract day of week to avoid timezone issues
+    const workingHoursResult = await client.query(
+      `SELECT
+         b.id AS barber_id,
+         CASE WHEN e.id IS NOT NULL THEN e.is_day_off
+              WHEN ws.id IS NOT NULL THEN ws.is_day_off
+              ELSE true
+         END AS is_day_off,
+         CASE WHEN e.id IS NOT NULL THEN e.start_time
+              ELSE ws.start_time
+         END AS start_time,
+         CASE WHEN e.id IS NOT NULL THEN e.end_time
+              ELSE ws.end_time
+         END AS end_time
+       FROM barbers b
+       LEFT JOIN barber_schedules ws
+         ON ws.barber_id = b.id
+         AND ws.day_of_week = EXTRACT(DOW FROM $2::date)
+       LEFT JOIN barber_schedule_exceptions e
+         ON e.barber_id = b.id
+         AND e.exception_date = $2
+       WHERE b.id = ANY($1::int[])`,
+      [allBarberIds, appointment_date]
+    );
+
+    const workingHoursMap = {};
+    for (const row of workingHoursResult.rows) {
+      workingHoursMap[row.barber_id] = row;
+    }
+
+    // --- Fetch all existing appointments for all barbers on this date in one query ---
     const existingAppointments = await client.query(
       `SELECT barber_id, start_time, end_time
        FROM appointments
        WHERE barber_id = ANY($1::int[])
          AND appointment_date = $2
          AND status IN ('pending', 'confirmed')`,
-      [uniqueBarberIds, appointment_date]
+      [allBarberIds, appointment_date]
     );
 
-    // Build map of barber_id → booked slots
     const bookedByBarber = {};
     for (const appt of existingAppointments.rows) {
-      const bid = appt.barber_id;
-      if (!bookedByBarber[bid]) bookedByBarber[bid] = [];
-      bookedByBarber[bid].push(appt);
+      if (!bookedByBarber[appt.barber_id]) bookedByBarber[appt.barber_id] = [];
+      bookedByBarber[appt.barber_id].push(appt);
     }
 
-    // Check each booking for conflicts against existing appointments
-    for (const booking of resolvedBookings) {
-      const booked = bookedByBarber[booking.barber_id] || [];
-      const slotStart = toMinutes(booking.start_time);
-      const slotEnd = toMinutes(booking.end_time);
+    // --- Resolve each person's details ---
+    const resolvedPersons = [];
 
-      const hasConflict = booked.some(b => {
-        return slotStart < toMinutes(b.end_time) && slotEnd > toMinutes(b.start_time);
-      });
+    for (const [index, person] of persons.entries()) {
+      const barberId = Number(person.barber_id);
+      const workingHours = workingHoursMap[barberId];
+
+      if (!workingHours || workingHours.is_day_off) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message: `Person ${index + 1}: barber ${barberId} is not working on this day`
+        });
+      }
+
+      // Calculate total duration and price
+      let totalDuration = 0;
+      let totalPrice = 0;
+      const resolvedServices = [];
+
+      for (const serviceId of person.services) {
+        const service = servicesMap[serviceId];
+
+        if (person.customer_type === 'child' && !service.child_duration_minutes) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            message: `Person ${index + 1}: service "${service.name}" does not have a child tier`
+          });
+        }
+
+        const duration = person.customer_type === 'child'
+          ? service.child_duration_minutes
+          : service.duration_minutes;
+
+        const price = person.customer_type === 'child'
+          ? service.child_price
+          : service.price;
+
+        totalDuration += duration;
+        totalPrice += parseFloat(price);
+
+        resolvedServices.push({
+          service_id: serviceId,
+          service_name: service.name,
+          customer_type: person.customer_type,
+          price: parseFloat(price),
+          duration_minutes: duration
+        });
+      }
+
+      const endTime = toTimeString(toMinutes(person.start_time) + totalDuration);
+
+      // Check slot fits within barber working hours
+      if (
+        toMinutes(person.start_time) < toMinutes(workingHours.start_time) ||
+        toMinutes(endTime) > toMinutes(workingHours.end_time)
+      ) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          message: `Person ${index + 1}: selected time is outside barber ${barberId} working hours`
+        });
+      }
+
+      // Check no conflict with existing appointments
+      const booked = bookedByBarber[barberId] || [];
+      const hasConflict = booked.some(b =>
+        toMinutes(person.start_time) < toMinutes(b.end_time) &&
+        toMinutes(endTime) > toMinutes(b.start_time)
+      );
 
       if (hasConflict) {
         await client.query('ROLLBACK');
         return res.status(409).json({
-          message: `Barber ${booking.barber_id} is no longer available at ${booking.start_time}. Please refresh and try again.`
+          message: `Person ${index + 1}: barber ${barberId} is no longer available at ${person.start_time}. Please refresh and try again.`
         });
+      }
+
+      resolvedPersons.push({
+        barber_id: barberId,
+        start_time: person.start_time,
+        end_time: endTime,
+        customer_type: person.customer_type,
+        total_duration: totalDuration,
+        total_price: totalPrice,
+        services: resolvedServices
+      });
+    }
+
+    // --- Check for overlapping times within the same barber across the group ---
+    for (let i = 0; i < resolvedPersons.length; i++) {
+      for (let j = i + 1; j < resolvedPersons.length; j++) {
+        const a = resolvedPersons[i];
+        const b = resolvedPersons[j];
+
+        if (a.barber_id !== b.barber_id) continue;
+
+        if (
+          toMinutes(a.start_time) < toMinutes(b.end_time) &&
+          toMinutes(a.end_time) > toMinutes(b.start_time)
+        ) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            message: `Person ${i + 1} and Person ${j + 1} have overlapping times with barber ${a.barber_id}`
+          });
+        }
       }
     }
 
-    // --- All checks passed — insert all appointments ---
-    const groupId = resolvedBookings.length > 1 ? uuidv4() : null;
-    const insertedAppointments = [];
+    // --- All checks passed — bulk insert all appointments ---
+    const groupId = resolvedPersons.length > 1 ? uuidv4() : null;
 
-    for (const booking of resolvedBookings) {
-      const result = await client.query(
-        `INSERT INTO appointments
-          (shop_id, barber_id, service_id, customer_id, group_id, customer_type,
-           appointment_date, start_time, end_time, price, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         RETURNING *`,
-        [
-          shop_id,
-          booking.barber_id,
-          service_id,
-          customer_id,
-          groupId,
-          booking.customer_type,
-          appointment_date,
-          booking.start_time,
-          booking.end_time,
-          booking.price,
-          booking.barber_id === Number(barber_id) ? (notes ?? null) : 'Guest booking'
-        ]
-      );
-      insertedAppointments.push(result.rows[0]);
-    }
+    // Build bulk insert for appointments
+    // All appointments inserted in one query
+    const appointmentValues = resolvedPersons.map((person, i) => 
+      `($${i * 11 + 1}, $${i * 11 + 2}, $${i * 11 + 3}, $${i * 11 + 4}, $${i * 11 + 5}, $${i * 11 + 6}, $${i * 11 + 7}, $${i * 11 + 8}, $${i * 11 + 9}, $${i * 11 + 10}, $${i * 11 + 11})`
+    ).join(', ');
+
+    const appointmentParams = resolvedPersons.flatMap(person => [
+      shop_id,
+      person.barber_id,
+      customer_id,
+      groupId,
+      person.customer_type,
+      appointment_date,
+      person.start_time,
+      person.end_time,
+      person.total_price,
+      person.total_duration,
+      notes ?? null
+    ]);
+
+    const appointmentsResult = await client.query(
+      `INSERT INTO appointments
+        (shop_id, barber_id, customer_id, group_id, customer_type,
+         appointment_date, start_time, end_time, total_price,
+         total_duration_minutes, notes)
+       VALUES ${appointmentValues}
+       RETURNING *`,
+      appointmentParams
+    );
+
+    const insertedAppointments = appointmentsResult.rows;
+
+    // Build bulk insert for appointment_services
+    // All services for all persons inserted in one query
+    const allServices = resolvedPersons.flatMap((person, personIndex) =>
+      person.services.map(service => ({
+        appointment_id: insertedAppointments[personIndex].id,
+        ...service
+      }))
+    );
+
+    const serviceValues = allServices.map((_, i) =>
+      `($${i * 6 + 1}, $${i * 6 + 2}, $${i * 6 + 3}, $${i * 6 + 4}, $${i * 6 + 5}, $${i * 6 + 6})`
+    ).join(', ');
+
+    const serviceParams = allServices.flatMap(s => [
+      s.appointment_id,
+      s.service_id,
+      s.service_name,
+      s.customer_type,
+      s.price,
+      s.duration_minutes
+    ]);
+
+    await client.query(
+      `INSERT INTO appointment_services
+        (appointment_id, service_id, service_name, customer_type, price, duration_minutes)
+       VALUES ${serviceValues}`,
+      serviceParams
+    );
 
     await client.query('COMMIT');
 
+    // Build response with services attached to each appointment
+    const response = insertedAppointments.map((appt, i) => ({
+      ...appt,
+      services: resolvedPersons[i].services
+    }));
+
     res.status(201).json({
       message: 'Appointment booked ✅',
-      appointments: insertedAppointments,
-      is_group: resolvedBookings.length > 1,
+      appointments: response,
+      is_group: resolvedPersons.length > 1,
       group_id: groupId
     });
   } catch (error) {
@@ -561,9 +677,7 @@ export const createAppointment = async (req, res) => {
   } finally {
     client.release();
   }
-};
-
-// ----------------------------
+};// ----------------------------
 // GET /api/appointments/token/:token
 // Get appointment details by cancellation token (customer's booking page)
 // ----------------------------
@@ -571,54 +685,114 @@ export const getAppointmentByToken = async (req, res) => {
   const { token } = req.params;
 
   try {
-    const result = await pool.query(
+    // One query gets appointment + shop info + cancellation window
+        const appointmentResult = await pool.query(
       `SELECT
-         a.*,
-         b.name AS barber_name,
-         s.name AS service_name,
-         sh.name AS shop_name,
-         sh.phone AS shop_phone,
-         st.cancellation_window_hours
-       FROM appointments a
-       JOIN barbers b ON a.barber_id = b.id
-       JOIN services s ON a.service_id = s.id
-       JOIN shops sh ON a.shop_id = sh.id
-       JOIN shop_settings st ON a.shop_id = st.shop_id
-       WHERE a.cancellation_token = $1`,
+        a.*,
+        b.name AS barber_name,
+        sh.name AS shop_name,
+        sh.phone AS shop_phone,
+        st.cancellation_window_hours,
+        (
+          (a.appointment_date + a.start_time)::timestamp - NOW() >
+          (st.cancellation_window_hours || ' hours')::interval
+          AND a.status IN ('pending', 'confirmed')
+        ) AS can_cancel
+      FROM appointments a
+      JOIN barbers b ON a.barber_id = b.id
+      JOIN shops sh ON a.shop_id = sh.id
+      JOIN shop_settings st ON a.shop_id = st.shop_id
+      WHERE a.cancellation_token = $1`,
       [token]
     );
-
-    if (result.rows.length === 0) {
+    if (appointmentResult.rows.length === 0) {
       return res.status(404).json({ message: 'Appointment not found' });
     }
 
-    const appointment = result.rows[0];
+    const appointment = appointmentResult.rows[0];
 
-    // Calculate if the customer can still cancel
-    const appointmentDateTime = new Date(
-      `${appointment.appointment_date.toISOString().split('T')[0]}T${appointment.start_time}`
-    );
-    const hoursUntilAppointment = (appointmentDateTime - new Date()) / (1000 * 60 * 60);
-    const canCancel =
-      hoursUntilAppointment >= appointment.cancellation_window_hours &&
-      ['pending', 'confirmed'].includes(appointment.status);
+    // One query gets services + group appointments together
+    // using a UNION to avoid two separate round trips
+    const [servicesResult, groupResult] = await Promise.all([
+      // Get services for this appointment
+      pool.query(
+        `SELECT
+           service_id,
+           service_name,
+           customer_type,
+           price,
+           duration_minutes
+         FROM appointment_services
+         WHERE appointment_id = $1`,
+        [appointment.id]
+      ),
 
-    res.json({ appointment, can_cancel: canCancel });
+      // Get all appointments in the group if group booking
+      // Returns empty if not a group booking
+      appointment.group_id
+        ? pool.query(
+            `SELECT
+               a.id,
+               a.cancellation_token,
+               a.customer_type,
+               a.start_time,
+               a.end_time,
+               a.total_price,
+               a.total_duration_minutes,
+               a.status,
+               b.name AS barber_name,
+               array_agg(
+                 json_build_object(
+                   'service_name', aps.service_name,
+                   'price', aps.price,
+                   'duration_minutes', aps.duration_minutes
+                 )
+               ) AS services
+             FROM appointments a
+             JOIN barbers b ON a.barber_id = b.id
+             JOIN appointment_services aps ON aps.appointment_id = a.id
+             WHERE a.group_id = $1
+             GROUP BY a.id, b.name
+             ORDER BY a.start_time ASC`,
+            [appointment.group_id]
+          )
+        : { rows: [] }
+    ]);
+
+    res.json({
+      appointment: {
+        ...appointment,
+        services: servicesResult.rows
+      },
+      group_appointments: groupResult.rows,
+      can_cancel: appointment.can_cancel
+    });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
-
 // ----------------------------
 // PUT /api/appointments/token/:token/cancel
 // Customer cancels using their unique token
 // ----------------------------
 export const cancelByCustomer = async (req, res) => {
   const { token } = req.params;
+  const { cancel_group = false } = req.body;
+
+  if (typeof cancel_group !== 'boolean') {
+    return res.status(400).json({ message: 'cancel_group must be a boolean' });
+  }
 
   try {
+    // Get appointment and cancellation window
     const result = await pool.query(
-      `SELECT a.*, st.cancellation_window_hours
+      `SELECT
+         a.*,
+         st.cancellation_window_hours,
+         (
+           (a.appointment_date + a.start_time)::timestamp - NOW() >
+           (st.cancellation_window_hours || ' hours')::interval
+         ) AS within_window
        FROM appointments a
        JOIN shop_settings st ON a.shop_id = st.shop_id
        WHERE a.cancellation_token = $1`,
@@ -631,40 +805,64 @@ export const cancelByCustomer = async (req, res) => {
 
     const appointment = result.rows[0];
 
+    // Check appointment can be cancelled
     if (!['pending', 'confirmed'].includes(appointment.status)) {
-      return res.status(400).json({ message: `Cannot cancel an appointment that is already ${appointment.status}` });
-    }
-
-    const appointmentDateTime = new Date(
-      `${appointment.appointment_date.toISOString().split('T')[0]}T${appointment.start_time}`
-    );
-    const hoursUntilAppointment = (appointmentDateTime - new Date()) / (1000 * 60 * 60);
-
-    if (hoursUntilAppointment < appointment.cancellation_window_hours) {
       return res.status(400).json({
-        message: `Cancellation window has passed. You can only cancel at least ${appointment.cancellation_window_hours} hours before your appointment.`
+        message: `Cannot cancel an appointment that is already ${appointment.status}`
       });
     }
 
-    // Cancel this appointment — if part of a group cancel all linked appointments
-    if (appointment.group_id) {
-      await pool.query(
-        `UPDATE appointments SET status = 'cancelled' WHERE group_id = $1`,
+    // Check cancellation window for this appointment
+    if (!appointment.within_window) {
+      return res.status(400).json({
+        message: `Cancellation window has passed. You can only cancel at least ${appointment.cancellation_window_hours} hours before your appointment. Please contact the shop.`
+      });
+    }
+
+    // If cancelling entire group check ALL group members are within window
+    if (cancel_group && appointment.group_id) {
+      const groupWindowCheck = await pool.query(
+        `SELECT COUNT(*) AS outside_window
+         FROM appointments a
+         JOIN shop_settings st ON a.shop_id = st.shop_id
+         WHERE a.group_id = $1
+           AND a.status IN ('pending', 'confirmed')
+           AND (a.appointment_date + a.start_time)::timestamp - NOW() <=
+               (st.cancellation_window_hours || ' hours')::interval`,
         [appointment.group_id]
       );
-    } else {
+
+      if (parseInt(groupWindowCheck.rows[0].outside_window) > 0) {
+        return res.status(400).json({
+          message: 'Cannot cancel the entire group — one or more appointments are within the cancellation window. Please contact the shop.'
+        });
+      }
+
+      // Cancel all group appointments
       await pool.query(
-        `UPDATE appointments SET status = 'cancelled' WHERE cancellation_token = $1`,
-        [token]
+        `UPDATE appointments
+         SET status = 'cancelled'
+         WHERE group_id = $1
+           AND status IN ('pending', 'confirmed')`,
+        [appointment.group_id]
       );
+
+      return res.json({ message: 'All group appointments cancelled ✅' });
     }
+
+    // Cancel just this appointment
+    await pool.query(
+      `UPDATE appointments
+       SET status = 'cancelled'
+       WHERE cancellation_token = $1`,
+      [token]
+    );
 
     res.json({ message: 'Appointment cancelled ✅' });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 };
-
 // ----------------------------
 // GET /api/appointments/shop/:shopId
 // Get all appointments for a shop (shop admin view)
