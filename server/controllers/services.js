@@ -1,21 +1,22 @@
 import pool from '../db/pool.js';
 
-
 const hasValue = (val) => val !== undefined && val !== null;
 
 // ----------------------------
 // POST /api/services
-// Create a new service for a shop
 // ----------------------------
 export const createService = async (req, res) => {
   const { shop_id, name, duration_minutes, price, child_duration_minutes, child_price } = req.body;
 
-  // Required fields
   if (!hasValue(shop_id) || !hasValue(name) || !hasValue(duration_minutes) || !hasValue(price)) {
     return res.status(400).json({ message: 'shop_id, name, duration_minutes and price are required' });
   }
 
-  // Adult fields must be valid numbers
+  // Shop admin can only create services for their own shop
+  if (req.user.shop_id !== parseInt(shop_id)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
   if (typeof duration_minutes !== 'number' || duration_minutes <= 0) {
     return res.status(400).json({ message: 'duration_minutes must be a positive number' });
   }
@@ -23,7 +24,6 @@ export const createService = async (req, res) => {
     return res.status(400).json({ message: 'price must be a positive number' });
   }
 
-  // Child fields are optional but must come together
   const hasChildDuration = hasValue(child_duration_minutes);
   const hasChildPrice = hasValue(child_price);
 
@@ -55,32 +55,38 @@ export const createService = async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
-
 };
-
 
 // ----------------------------
 // GET /api/services/shop/:shopId
-// Get all active services for a shop
+// Public route — no ownership check needed
 // ----------------------------
 export const getShopServices = async (req, res) => {
   const { shopId } = req.params;
+  const { customer_type } = req.query;
 
   try {
-    // Check the shop exists
     const shopCheck = await pool.query('SELECT id FROM shops WHERE id = $1', [shopId]);
     if (shopCheck.rows.length === 0) {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    const result = await pool.query(
-      `SELECT id, shop_id, name, duration_minutes, price, child_duration_minutes, child_price, is_active
-       FROM services
-       WHERE shop_id = $1
-       ORDER BY name ASC`,
-      [shopId]
-    );
+    // If customer_type is child only return services with child tier
+    let query = `
+      SELECT id, shop_id, name, duration_minutes, price,
+             child_duration_minutes, child_price, is_active
+      FROM services
+      WHERE shop_id = $1
+        AND is_active = true
+    `;
 
+    if (customer_type === 'child') {
+      query += ' AND child_duration_minutes IS NOT NULL AND child_price IS NOT NULL';
+    }
+
+    query += ' ORDER BY name ASC';
+
+    const result = await pool.query(query, [shopId]);
     res.json({ services: result.rows });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -89,9 +95,7 @@ export const getShopServices = async (req, res) => {
 
 // ----------------------------
 // PUT /api/services/:id
-// Update a service
 // ----------------------------
-
 export const updateService = async (req, res) => {
   const { id } = req.params;
   const { shop_id } = req.query;
@@ -101,7 +105,11 @@ export const updateService = async (req, res) => {
     return res.status(400).json({ message: 'shop_id query parameter is required' });
   }
 
-  // Only validate fields that were actually provided
+  // Shop admin can only update services in their own shop
+  if (req.user.shop_id !== parseInt(shop_id)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
   if (hasValue(duration_minutes) && (typeof duration_minutes !== 'number' || duration_minutes <= 0)) {
     return res.status(400).json({ message: 'duration_minutes must be a positive number' });
   }
@@ -122,22 +130,20 @@ export const updateService = async (req, res) => {
     }
 
     const serviceCheck = await pool.query(
-      'SELECT id FROM services WHERE id = $1 AND shop_id = $2',
+      'SELECT * FROM services WHERE id = $1 AND shop_id = $2',
       [id, shop_id]
     );
     if (serviceCheck.rows.length === 0) {
       return res.status(404).json({ message: 'Service not found in this shop' });
     }
 
+    const existingService = serviceCheck.rows[0];
 
-    // Figure out what child_price and child_duration_minutes will be after the update
-    // If a new value is provided use it, otherwise keep the existing DB value
     const finalChildPrice = hasValue(child_price) ? child_price : existingService.child_price;
     const finalChildDuration = hasValue(child_duration_minutes) ? child_duration_minutes : existingService.child_duration_minutes;
 
-    // After the update one cannot be set while the other is null
     if (hasValue(finalChildPrice) !== hasValue(finalChildDuration)) {
-    return res.status(400).json({ message: 'child_price and child_duration_minutes must both be set or both be null' });
+      return res.status(400).json({ message: 'child_price and child_duration_minutes must both be set or both be null' });
     }
 
     const result = await pool.query(
@@ -169,7 +175,6 @@ export const updateService = async (req, res) => {
 
 // ----------------------------
 // DELETE /api/services/:id
-// Delete a service
 // ----------------------------
 export const deleteService = async (req, res) => {
   const { id } = req.params;
@@ -179,15 +184,17 @@ export const deleteService = async (req, res) => {
     return res.status(400).json({ message: 'shop_id query parameter is required' });
   }
 
+  // Shop admin can only delete services in their own shop
+  if (req.user.shop_id !== parseInt(shop_id)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
 
   try {
-    // Check the shop exists
     const shopCheck = await pool.query('SELECT id FROM shops WHERE id = $1', [shop_id]);
     if (shopCheck.rows.length === 0) {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    // Delete only if service belongs to this shop
     const result = await pool.query(
       'DELETE FROM services WHERE id = $1 AND shop_id = $2 RETURNING id',
       [id, shop_id]

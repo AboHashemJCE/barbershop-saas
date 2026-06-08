@@ -713,6 +713,11 @@ export const getAppointmentByToken = async (req, res) => {
 
     const appointment = appointmentResult.rows[0];
 
+    // Customer can only view their own appointments
+    if (req.user.id !== appointment.customer_id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
     // One query gets services + group appointments together
     // using a UNION to avoid two separate round trips
     const [servicesResult, groupResult] = await Promise.all([
@@ -807,6 +812,11 @@ export const cancelByCustomer = async (req, res) => {
 
     const appointment = result.rows[0];
 
+    // Customer can only cancel their own appointments
+    if (req.user.id !== appointment.customer_id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
     // Check appointment can be cancelled
     if (!['pending', 'confirmed'].includes(appointment.status)) {
       return res.status(400).json({
@@ -873,6 +883,11 @@ export const cancelByCustomer = async (req, res) => {
 export const getShopAppointments = async (req, res) => {
   const { shopId } = req.params;
   const { status, date } = req.query;
+  
+  // Shop admin can only view appointments for their own shop
+  if (req.user.shop_id !== parseInt(shopId)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
 
   try {
     const shopCheck = await pool.query('SELECT id FROM shops WHERE id = $1', [shopId]);
@@ -935,6 +950,16 @@ export const getBarberAppointments = async (req, res) => {
 
   if (!shop_id) {
     return res.status(400).json({ message: 'shop_id query parameter is required' });
+  }
+
+  // Barber can only view their own appointments
+  if (req.user.id !== parseInt(barberId)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
+  // Barber must belong to the shop they are querying
+  if (req.user.shop_id !== parseInt(shop_id)) {
+    return res.status(403).json({ message: 'Access denied' });
   }
 
   try {
@@ -1014,7 +1039,7 @@ export const updateAppointmentStatus = async (req, res) => {
     }
 
     const appointmentCheck = await pool.query(
-      'SELECT id, status FROM appointments WHERE id = $1 AND barber_id = $2',
+      'SELECT id, status, barber_id FROM appointments WHERE id = $1 AND barber_id = $2',
       [id, barber_id]
     );
     if (appointmentCheck.rows.length === 0) {
@@ -1054,22 +1079,12 @@ export const cancelByBarber = async (req, res) => {
   }
 
   try {
-    const shopCheck = await pool.query('SELECT id FROM shops WHERE id = $1', [shop_id]);
-    if (shopCheck.rows.length === 0) {
-      return res.status(404).json({ message: 'Shop not found' });
-    }
 
-    // If barber_id is provided → barber cancelling their own appointment
-    // If not provided → shop admin cancelling any appointment in their shop
-    const appointmentResult = barber_id
-      ? await pool.query(
-          'SELECT * FROM appointments WHERE id = $1 AND barber_id = $2 AND shop_id = $3',
-          [id, barber_id, shop_id]
-        )
-      : await pool.query(
-          'SELECT * FROM appointments WHERE id = $1 AND shop_id = $2',
-          [id, shop_id]
-        );
+    // Get appointment
+    const appointmentResult = await pool.query(
+      'SELECT * FROM appointments WHERE id = $1',
+      [id]
+    );
 
     if (appointmentResult.rows.length === 0) {
       return res.status(404).json({ message: 'Appointment not found' });
@@ -1077,11 +1092,25 @@ export const cancelByBarber = async (req, res) => {
 
     const appointment = appointmentResult.rows[0];
 
+    // Ownership check:
+    // Barber can only cancel their own appointments
+    // Shop admin can cancel any appointment in their shop
+    if (req.user.role === 'barber' && req.user.id !== appointment.barber_id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    if (req.user.role === 'shop_admin' && req.user.shop_id !== appointment.shop_id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
     if (appointment.status === 'cancelled') {
       return res.status(400).json({ message: 'Appointment is already cancelled' });
     }
+    if (appointment.status === 'no_show' || appointment.status == 'completed') {
+          return res.status(400).json({ message: 'Appointment is already done with' });
+    }
 
-    // Cancel this appointment — if part of a group cancel all linked appointments
+    // Cancel this appointment or entire group
     if (appointment.group_id) {
       await pool.query(
         `UPDATE appointments
@@ -1098,7 +1127,7 @@ export const cancelByBarber = async (req, res) => {
       );
     }
 
-    // TODO: Send WhatsApp message to customer (Step 7 - Twilio)
+    // TODO: Send WhatsApp message to customer (Step 8 - Twilio)
 
     res.json({ message: 'Appointment cancelled ✅', reason });
   } catch (error) {

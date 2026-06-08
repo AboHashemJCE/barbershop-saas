@@ -1,8 +1,9 @@
 import pool from '../db/pool.js';
+import bcrypt from 'bcrypt';
 
 // ----------------------------
 // POST /api/barbers
-// Create a new barber for a shop
+// Shop admin creates a barber for their shop
 // ----------------------------
 export const createBarber = async (req, res) => {
   const { shop_id, name, email, password, phone } = req.body;
@@ -11,32 +12,40 @@ export const createBarber = async (req, res) => {
     return res.status(400).json({ message: 'shop_id, name, email and password are required' });
   }
 
+  // Shop admin can only create barbers for their own shop
+  if (req.user.shop_id !== parseInt(shop_id)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
   try {
-    // Check the shop exists
-    const shopCheck = await pool.query('SELECT id FROM shops WHERE id = $1', [shop_id]);
+    const shopCheck = await pool.query(
+      'SELECT id FROM shops WHERE id = $1',
+      [shop_id]
+    );
     if (shopCheck.rows.length === 0) {
       return res.status(404).json({ message: 'Shop not found' });
     }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
       `INSERT INTO barbers (shop_id, name, email, password, phone)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, shop_id, name, email, phone, is_active, created_at`,
-      [shop_id, name, email, password, phone]
+      [shop_id, name, email, hashedPassword, phone]
     );
 
-        const barber = result.rows[0];
+    const barber = result.rows[0];
 
-    // Automatically insert a default weekly schedule for the new barber
-    // Mon-Fri 9am-5pm, Sat-Sun off
+    // Insert default weekly schedule
     const defaultSchedule = [
-      { day_of_week: 0, is_day_off: true,  start_time: null,    end_time: null    }, // Sunday
-      { day_of_week: 1, is_day_off: false, start_time: '09:00', end_time: '17:00' }, // Monday
-      { day_of_week: 2, is_day_off: false, start_time: '09:00', end_time: '17:00' }, // Tuesday
-      { day_of_week: 3, is_day_off: false, start_time: '09:00', end_time: '17:00' }, // Wednesday
-      { day_of_week: 4, is_day_off: false, start_time: '09:00', end_time: '17:00' }, // Thursday
-      { day_of_week: 5, is_day_off: false, start_time: '09:00', end_time: '17:00' }, // Friday
-      { day_of_week: 6, is_day_off: true,  start_time: null,    end_time: null    }, // Saturday
+      { day_of_week: 0, is_day_off: true,  start_time: null,    end_time: null    },
+      { day_of_week: 1, is_day_off: false, start_time: '09:00', end_time: '17:00' },
+      { day_of_week: 2, is_day_off: false, start_time: '09:00', end_time: '17:00' },
+      { day_of_week: 3, is_day_off: false, start_time: '09:00', end_time: '17:00' },
+      { day_of_week: 4, is_day_off: false, start_time: '09:00', end_time: '17:00' },
+      { day_of_week: 5, is_day_off: false, start_time: '09:00', end_time: '17:00' },
+      { day_of_week: 6, is_day_off: true,  start_time: null,    end_time: null    },
     ];
 
     for (const day of defaultSchedule) {
@@ -47,11 +56,10 @@ export const createBarber = async (req, res) => {
       );
     }
 
-
-    res.status(201).json( { 
-        message: 'Barber created ✅', 
-        barber,
-        default_schedule: 'Mon-Fri 9:00am-5:00pm, Sat-Sun off'
+    res.status(201).json({
+      message: 'Barber created ✅',
+      barber,
+      default_schedule: 'Mon-Fri 9:00am-5:00pm, Sat-Sun off'
     });
   } catch (error) {
     if (error.code === '23505') {
@@ -63,13 +71,16 @@ export const createBarber = async (req, res) => {
 
 // ----------------------------
 // GET /api/barbers/shop/:shopId
-// Get all barbers for a shop
 // ----------------------------
 export const getShopBarbers = async (req, res) => {
   const { shopId } = req.params;
 
+  // Shop admin can only view barbers of their own shop
+  if (req.user.shop_id !== parseInt(shopId)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
   try {
-    // Check the shop exists
     const shopCheck = await pool.query('SELECT id FROM shops WHERE id = $1', [shopId]);
     if (shopCheck.rows.length === 0) {
       return res.status(404).json({ message: 'Shop not found' });
@@ -91,7 +102,6 @@ export const getShopBarbers = async (req, res) => {
 
 // ----------------------------
 // PUT /api/barbers/:id
-// Update a barber's info
 // ----------------------------
 export const updateBarber = async (req, res) => {
   const { id } = req.params;
@@ -102,14 +112,17 @@ export const updateBarber = async (req, res) => {
     return res.status(400).json({ message: 'shop_id query parameter is required' });
   }
 
+  // Shop admin can only update barbers in their own shop
+  if (req.user.shop_id !== parseInt(shop_id)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
   try {
-    // Check the shop exists
     const shopCheck = await pool.query('SELECT id FROM shops WHERE id = $1', [shop_id]);
     if (shopCheck.rows.length === 0) {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    // Check the barber exists AND belongs to this shop
     const barberCheck = await pool.query(
       'SELECT id FROM barbers WHERE id = $1 AND shop_id = $2',
       [id, shop_id]
@@ -125,7 +138,7 @@ export const updateBarber = async (req, res) => {
            is_active = COALESCE($3, is_active)
        WHERE id = $4
        RETURNING id, shop_id, name, email, phone, is_active`,
-      [name, phone, is_active, id]
+      [name ?? null, phone ?? null, is_active ?? null, id]
     );
 
     res.json({ message: 'Barber updated ✅', barber: result.rows[0] });
@@ -136,24 +149,26 @@ export const updateBarber = async (req, res) => {
 
 // ----------------------------
 // DELETE /api/barbers/:id
-// Delete a barber
 // ----------------------------
 export const deleteBarber = async (req, res) => {
   const { id } = req.params;
   const { shop_id } = req.query;
 
   if (!shop_id) {
-    return res.status(400).json({ message: 'shop_id is required' });
+    return res.status(400).json({ message: 'shop_id query parameter is required' });
+  }
+
+  // Shop admin can only delete barbers in their own shop
+  if (req.user.shop_id !== parseInt(shop_id)) {
+    return res.status(403).json({ message: 'Access denied' });
   }
 
   try {
-    // Check the shop exists
     const shopCheck = await pool.query('SELECT id FROM shops WHERE id = $1', [shop_id]);
     if (shopCheck.rows.length === 0) {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    // Delete only if barber belongs to this shop
     const result = await pool.query(
       'DELETE FROM barbers WHERE id = $1 AND shop_id = $2 RETURNING id',
       [id, shop_id]
