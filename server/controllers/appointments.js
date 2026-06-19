@@ -9,6 +9,11 @@
 
 import pool from '../db/pool.js';
 import { v4 as uuidv4 } from 'uuid';
+import {
+  sendBookingConfirmation,
+  sendAppointmentConfirmed,
+  sendCancellationNotice
+} from '../utils/whatsapp.js';
 
 // ----------------------------
 // HELPER: Convert 'HH:MM' or 'HH:MM:SS' to minutes from midnight
@@ -429,12 +434,18 @@ export const createAppointment = async (req, res) => {
 
     // --- Fetch all barbers in one query ---
     const barbersResult = await client.query(
-      `SELECT id FROM barbers
+      `SELECT id, name FROM barbers
        WHERE id = ANY($1::int[])
          AND shop_id = $2
          AND is_active = true`,
       [allBarberIds, shop_id]
     );
+
+    // Build map of barber_id → barber name
+    const barbersMap = {};
+    for (const barber of barbersResult.rows) {
+      barbersMap[barber.id] = barber.name;
+    }
 
     if (barbersResult.rows.length !== allBarberIds.length) {
       await client.query('ROLLBACK');
@@ -566,6 +577,7 @@ export const createAppointment = async (req, res) => {
 
       resolvedPersons.push({
         barber_id: barberId,
+        barber_name: barbersMap[barberId],
         start_time: person.start_time,
         end_time: endTime,
         customer_type: person.customer_type,
@@ -660,6 +672,40 @@ export const createAppointment = async (req, res) => {
     );
 
     await client.query('COMMIT');
+
+    // Send WhatsApp confirmation to customer
+    // Use data we already have — no extra DB queries needed
+    try {
+      const customerResult = await pool.query(
+        'SELECT name, phone FROM customers WHERE id = $1',
+        [customer_id]
+      );
+
+      const customer = customerResult.rows[0];
+
+      const shopResult = await pool.query(
+        'SELECT name FROM shops WHERE id = $1',
+        [shop_id]
+      );
+
+      // Build appointments with details from already resolved data
+      const appointmentsWithDetails = insertedAppointments.map((appt, i) => ({
+        appointment_date: appt.appointment_date,
+        start_time: appt.start_time,
+        end_time: appt.end_time,
+        total_price: appt.total_price,
+        barber_name: resolvedPersons[i].barber_name,
+        services: resolvedPersons[i].services
+      }));
+
+      await sendBookingConfirmation(
+        customer,
+        appointmentsWithDetails,
+        shopResult.rows[0].name
+      );
+    } catch (err) {
+      console.error('WhatsApp notification failed:', err.message);
+    }
 
     // Build response with services attached to each appointment
     const response = insertedAppointments.map((appt, i) => ({
@@ -945,13 +991,7 @@ export const getShopAppointments = async (req, res) => {
 // Optional filters: status, date
 // ----------------------------
 export const getBarberAppointments = async (req, res) => {
-  const { barberId } = req.params;
-  const { shop_id, status, date } = req.query;
-
-  if (!shop_id) {
-    return res.status(400).json({ message: 'shop_id query parameter is required' });
-  }
-
+  const { barberId } = req.params; const { shop_id, status, date } = req.query; if (!shop_id) { return res.status(400).json({ message: 'shop_id query parameter is required' }); }
   // Barber can only view their own appointments
   if (req.user.id !== parseInt(barberId)) {
     return res.status(403).json({ message: 'Access denied' });
@@ -1059,6 +1099,30 @@ export const updateAppointmentStatus = async (req, res) => {
       [status, id]
     );
 
+    // Send WhatsApp notification when barber confirms
+    if (status === 'confirmed') {
+      try {
+        const details = await pool.query(
+          `SELECT
+            a.appointment_date,
+            a.start_time,
+            a.end_time,
+            b.name AS barber_name,
+            c.phone AS customer_phone
+          FROM appointments a
+          JOIN barbers b ON a.barber_id = b.id
+          JOIN customers c ON a.customer_id = c.id
+          WHERE a.id = $1`,
+          [id]
+        );
+
+        const appt = details.rows[0];
+        await sendAppointmentConfirmed(appt.customer_phone, appt);
+      } catch (err) {
+        console.error('WhatsApp notification failed:', err.message);
+      }
+    }
+
     res.json({ message: `Appointment marked as ${status} ✅`, appointment: result.rows[0] });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -1127,7 +1191,26 @@ export const cancelByBarber = async (req, res) => {
       );
     }
 
-    // TODO: Send WhatsApp message to customer (Step 8 - Twilio)
+    
+    try {
+      const details = await pool.query(
+        `SELECT
+          a.appointment_date,
+          a.start_time,
+          b.name AS barber_name,
+          c.phone AS customer_phone
+        FROM appointments a
+        JOIN barbers b ON a.barber_id = b.id
+        JOIN customers c ON a.customer_id = c.id
+        WHERE a.id = $1`,
+        [id]
+      );
+
+      const appt = details.rows[0];
+      await sendCancellationNotice(appt.customer_phone, appt, reason);
+    } catch (err) {
+      console.error('WhatsApp notification failed:', err.message);
+    }
 
     res.json({ message: 'Appointment cancelled ✅', reason });
   } catch (error) {

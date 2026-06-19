@@ -1,5 +1,6 @@
 import pool from '../db/pool.js';
 import bcrypt from 'bcrypt';
+import { isValidEmail } from '../utils/validate.js';
 
 // ----------------------------
 // POST /api/barbers
@@ -10,6 +11,10 @@ export const createBarber = async (req, res) => {
 
   if (!shop_id || !name || !email || !password) {
     return res.status(400).json({ message: 'shop_id, name, email and password are required' });
+  }
+
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ message: 'Invalid email format' });
   }
 
   // Shop admin can only create barbers for their own shop

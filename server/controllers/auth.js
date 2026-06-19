@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import twilio from 'twilio';
 import dotenv from 'dotenv';
+import { isValidPhone } from '../utils/validate.js';
 
 dotenv.config();
 
@@ -18,13 +19,6 @@ const generateToken = (payload, expiresIn) => {
   return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn });
 };
 
-// ----------------------------
-// HELPER: Validate phone number format
-// Must be in international format e.g. +972599000000
-// ----------------------------
-const isValidPhone = (phone) => {
-  return /^\+[1-9]\d{7,14}$/.test(phone);
-};
 
 // ----------------------------
 // POST /api/auth/customer/request-otp
@@ -299,6 +293,159 @@ export const superAdminLogin = async (req, res) => {
         email: admin.email
       }
     });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+// ----------------------------
+// PUT /api/auth/barber/change-password
+// ----------------------------
+export const changeBarberPassword = async (req, res) => {
+  const { current_password, new_password } = req.body;
+
+  if (!current_password || !new_password) {
+    return res.status(400).json({ message: 'current_password and new_password are required' });
+  }
+
+  if (new_password.length < 8) {
+    return res.status(400).json({ message: 'new_password must be at least 8 characters' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT id, password FROM barbers WHERE id = $1',
+      [req.user.id]
+    );
+
+    const barber = result.rows[0];
+
+    const passwordMatch = await bcrypt.compare(current_password, barber.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ message: 'Current password is incorrect' });
+    }
+
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+
+    await pool.query(
+      'UPDATE barbers SET password = $1 WHERE id = $2',
+      [hashedPassword, req.user.id]
+    );
+
+    res.json({ message: 'Password changed ✅' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+// ----------------------------
+// PUT /api/auth/shop/change-password
+// ----------------------------
+export const changeShopPassword = async (req, res) => {
+  const { current_password, new_password } = req.body;
+
+  if (!current_password || !new_password) {
+    return res.status(400).json({ message: 'current_password and new_password are required' });
+  }
+
+  if (new_password.length < 8) {
+    return res.status(400).json({ message: 'new_password must be at least 8 characters' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT id, owner_password FROM shops WHERE id = $1',
+      [req.user.shop_id]
+    );
+
+    const shop = result.rows[0];
+
+    const passwordMatch = await bcrypt.compare(current_password, shop.owner_password);
+    if (!passwordMatch) {
+      return res.status(401).json({ message: 'Current password is incorrect' });
+    }
+
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+
+    await pool.query(
+      'UPDATE shops SET owner_password = $1 WHERE id = $2',
+      [hashedPassword, req.user.shop_id]
+    );
+
+    res.json({ message: 'Password changed ✅' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+// ----------------------------
+// PUT /api/auth/customer/profile
+// ----------------------------
+export const updateCustomerProfile = async (req, res) => {
+  const { name } = req.body;
+
+  if (!name) {
+    return res.status(400).json({ message: 'name is required' });
+  }
+
+  try {
+    const result = await pool.query(
+      'UPDATE customers SET name = $1 WHERE id = $2 RETURNING id, name, phone',
+      [name, req.user.id]
+    );
+
+    res.json({ message: 'Profile updated ✅', customer: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+// ----------------------------
+// PUT /api/auth/barber/profile
+// ----------------------------
+export const updateBarberProfile = async (req, res) => {
+  const { name, phone } = req.body;
+
+  if (!name && !phone) {
+    return res.status(400).json({ message: 'name or phone is required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE barbers
+       SET name = COALESCE($1, name),
+           phone = COALESCE($2, phone)
+       WHERE id = $3
+       RETURNING id, name, email, phone, shop_id`,
+      [name ?? null, phone ?? null, req.user.id]
+    );
+
+    res.json({ message: 'Profile updated ✅', barber: result.rows[0] });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+// ----------------------------
+// PUT /api/auth/shop/profile
+// ----------------------------
+export const updateShopProfile = async (req, res) => {
+  const { name, phone, address } = req.body;
+
+  if (!name && !phone && !address) {
+    return res.status(400).json({ message: 'At least one field is required' });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE shops
+       SET name = COALESCE($1, name),
+           phone = COALESCE($2, phone),
+           address = COALESCE($3, address)
+       WHERE id = $4
+       RETURNING id, name, slug, owner_email, phone, address, is_active`,
+      [name ?? null, phone ?? null, address ?? null, req.user.shop_id]
+    );
+
+    res.json({ message: 'Shop profile updated ✅', shop: result.rows[0] });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }

@@ -1,4 +1,7 @@
 import pool from '../db/pool.js';
+import bcrypt from 'bcrypt';
+import { sanitize } from '../utils/sanitize.js';
+import { isValidEmail, isValidSlug } from '../utils/validate.js';
 
 // ----------------------------
 // POST /api/shops
@@ -12,14 +15,23 @@ export const createShop = async (req, res) => {
     return res.status(400).json({ message: 'name, slug, owner_email and owner_password are required' });
   }
 
+  if (!isValidEmail(owner_email)) {
+    return res.status(400).json({ message: 'Invalid email format' });
+  }
+
+  if (!isValidSlug(slug)) {
+    return res.status(400).json({ message: 'Slug can only contain lowercase letters, numbers and hyphens' });
+  }
+
   try {
     // Insert the shop
     const shopResult = await pool.query(
       `INSERT INTO shops (name, slug, owner_email, owner_password, phone, address)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
-      [name, slug, owner_email, owner_password, phone, address]
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *`,
+      [name, slug, owner_email, hashedPassword, phone, address]
     );
+
 
     const shop = shopResult.rows[0];
 
@@ -30,7 +42,7 @@ export const createShop = async (req, res) => {
       [shop.id, 2]
     );
 
-    res.status(201).json({ message: 'Shop created ✅', shop });
+    res.status(201).json({ message: 'Shop created ✅', shop: sanitize(shop) });
   } catch (error) {
     // Handle duplicate slug or email
     if (error.code === '23505') {
@@ -52,7 +64,7 @@ export const getAllShops = async (req, res) => {
        ORDER BY created_at DESC`
     );
 
-    res.json({ shops: result.rows });
+    res.json({ shops: sanitize(result.rows) });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
@@ -84,7 +96,35 @@ export const getShopBySlug = async (req, res) => {
       return res.status(403).json({ message: 'This shop is currently inactive' });
     }
 
-    res.json({ shop });
+    res.json({ shop: sanitize(shop) });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+export const updateShopStatus = async (req, res) => {
+  const { id } = req.params;
+  const { is_active } = req.body;
+
+  if (typeof is_active !== 'boolean') {
+    return res.status(400).json({ message: 'is_active must be a boolean' });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE shops SET is_active = $1 WHERE id = $2
+       RETURNING id, name, slug, owner_email, phone, address, is_active, created_at`,
+      [is_active, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+
+    res.json({
+      message: `Shop ${is_active ? 'activated' : 'suspended'} ✅`,
+      shop: result.rows[0]
+    });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
