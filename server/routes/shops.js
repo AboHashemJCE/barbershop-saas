@@ -1,5 +1,5 @@
 import express from 'express';
-import { createShop, getShopBySlug, getAllShops} from '../controllers/shops.js';
+import { createShop, getShopBySlug, getAllShops, updateShopStatus} from '../controllers/shops.js';
 import { authenticate, requireRole } from '../middleware/auth.js'
 
 const router = express.Router();
